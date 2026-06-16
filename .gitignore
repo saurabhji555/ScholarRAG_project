@@ -34,3 +34,11 @@ ScholarRAG/frontend/.vite/
 # Session docs
 ScholarRAG/SESSION_SUMMARY.md
 ScholarRAG/ScholarRAG_Session_Summary.pdf
+
+# Database
+ScholarRAG/backend/users.db
+
+# Root-level noise
+node_modules/
+package.json
+package-lock.json

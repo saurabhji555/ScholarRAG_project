@@ -3,39 +3,52 @@ load_dotenv()
 
 import os
 import io
+import certifi
+import requests
 import anthropic
 import pdfplumber
 from langchain_huggingface import HuggingFaceEmbeddings
 from qdrant_client import QdrantClient
+from sentence_transformers import CrossEncoder
 
-QDRANT_PATH = os.path.join(os.path.dirname(__file__), "..", "qdrant_local", "qdrant_local")
+_qdrant_base   = os.path.join(os.path.dirname(__file__), "..", "qdrant_local")
+_qdrant_nested = os.path.join(_qdrant_base, "qdrant_local")
+QDRANT_PATH    = _qdrant_nested if os.path.isdir(_qdrant_nested) else _qdrant_base
 COLLECTION  = "papers"
 MODEL_NAME  = "all-MiniLM-L6-v2"
 
-SYSTEM_PROMPT = """You are ScholarRAG, an expert AI research assistant with deep knowledge of academic literature.
+SYSTEM_PROMPT = """You are ScholarRAG, a research assistant with strong knowledge of machine learning, computer science, and academic research.
 
-When answering questions, always:
-- Start with a clear, direct answer in 1-2 sentences
-- Use **bold** for key terms and concepts
-- Use bullet points or numbered lists for multiple findings or steps
-- Cite papers inline using the format: *Paper Title (Year)*
-- End with a brief "**Key Takeaway**" summarizing the main insight
+Your job is to actually answer the user's question — not to summarize papers at them.
 
-Keep responses focused and professional. Do not repeat the question. Do not use unnecessary filler phrases."""
+Lead with your own understanding. The papers and code snippets provided are supplementary — cite them when they add something specific, ignore them if they're off-topic. Never force-fit an abstract into your answer just because it was retrieved.
 
-_embeddings = None
-_qdrant     = None
-_client     = None
+How to respond:
+- Answer the actual question first, from your own knowledge, in plain language
+- Use the retrieved papers to add depth, a citation, or a concrete example — not as the backbone of your entire reply
+- If code was fetched (README, source file): pull out the relevant snippet, show it, explain what it actually does
+- If a PDF was uploaded: treat it as the primary document and answer relative to its content specifically
+- Short question = short answer. Long technical question = go deep. Match the energy of what was asked
+- No forced structure. Write like you're explaining to a smart colleague, not filling out a form
+- No filler. No "Great question!", no "Certainly!", no restating the question
+
+If the user asks which AI model or technology powers YOU specifically — respond with: "Sorry, that's outside the scope of this application. I'm here to help you explore academic research." Do NOT apply this to any research question about AI, ML, or code."""
+
+_embeddings    = None
+_qdrant        = None
+_client        = None
+_cross_encoder = None
 
 _memories: dict[str, list] = {}
 
 
 def init():
-    global _embeddings, _qdrant, _client
+    global _embeddings, _qdrant, _client, _cross_encoder
 
-    _embeddings = HuggingFaceEmbeddings(model_name=MODEL_NAME)
-    _qdrant     = QdrantClient(path=QDRANT_PATH)
-    _client     = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    _embeddings    = HuggingFaceEmbeddings(model_name=MODEL_NAME)
+    _qdrant        = QdrantClient(path=QDRANT_PATH)
+    _client        = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    _cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 
 def _extract_pdf_text(pdf_bytes: bytes) -> str:
@@ -76,6 +89,42 @@ def _github_links(payload: dict) -> list[str]:
     return [single] if single else []
 
 
+
+FETCH_URL_TOOL = {
+    "name": "fetch_url",
+    "description": (
+        "Fetch the content of a URL. Use this to read GitHub repositories, "
+        "READMEs, raw code files, or arXiv papers when you need to understand "
+        "an implementation in depth. For GitHub repo URLs, prefer fetching the "
+        "README or specific Python files."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "The URL to fetch."}
+        },
+        "required": ["url"],
+    },
+    "cache_control": {"type": "ephemeral"},
+}
+
+
+def _execute_fetch(url: str) -> str:
+    try:
+        if "github.com" in url and "/blob/" in url:
+            url = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+        headers = {"User-Agent": "ScholarRAG/1.0"}
+        gh_token = os.getenv("GITHUB_TOKEN", "")
+        if ("github.com" in url or "raw.githubusercontent.com" in url) and gh_token:
+            headers["Authorization"] = f"token {gh_token}"
+        r = requests.get(url, headers=headers, timeout=15, verify=certifi.where())
+        if r.status_code != 200:
+            return f"HTTP {r.status_code} — could not fetch URL"
+        return r.text[:6000]
+    except Exception as e:
+        return f"Error fetching URL: {e}"
+
+
 def _classify_query(question: str) -> str:
     resp = _client.messages.create(
         model="claude-haiku-4-5-20251001",
@@ -94,23 +143,57 @@ def _classify_query(question: str) -> str:
     return "research" if "research" in label else "conversational"
 
 
-def query_rag(question: str, session_id: str, pdf_bytes: bytes = None) -> dict:
+def _hyde_query(question: str) -> str:
+    try:
+        resp = _client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Write a 2-3 sentence academic paper abstract that would directly answer this question:\n\n"
+                    f"{question}\n\n"
+                    f"Write only the abstract text. No title, no explanation, no preamble."
+                ),
+            }],
+        )
+        return resp.content[0].text.strip()
+    except Exception:
+        return question
+
+
+def _prepare_query(question: str, session_id: str, pdf_bytes: bytes = None, preloaded_history: list = None):
+    if session_id not in _memories and preloaded_history:
+        _memories[session_id] = preloaded_history
     history = _get_memory(session_id)
     intent  = _classify_query(question)
     sources = []
 
     if intent == "research":
-        pdf_text     = _extract_pdf_text(pdf_bytes) if pdf_bytes else None
-        search_query = f"{question} {pdf_text[:1500]}" if pdf_text else question
+        pdf_text = _extract_pdf_text(pdf_bytes) if pdf_bytes else None
+        hyde_abstract = _hyde_query(question)
+        search_text   = f"{hyde_abstract} {pdf_text[:1500]}" if pdf_text else hyde_abstract
 
-        SCORE_THRESHOLD = 0.30
+        SCORE_THRESHOLD = 0.45
+        TARGET = 2
 
-        candidates = _search(search_query, k=10)
+        candidates = _search(search_text, k=15)
         filtered   = [r for r in candidates if r.score >= SCORE_THRESHOLD]
-        filtered.sort(key=lambda r: (not bool(_github_links(r.payload)), -r.score))
-        results      = filtered[:5]
-        context_hits = results[:2]
 
+        if filtered and _cross_encoder:
+            pairs     = [[question, f"{r.payload.get('title','')}. {r.payload.get('summary','')}"] for r in filtered]
+            ce_scores = _cross_encoder.predict(pairs)
+            filtered  = [r for _, r in sorted(zip(ce_scores, filtered), key=lambda x: -x[0])]
+
+        with_code    = [r for r in filtered if _github_links(r.payload)]
+        without_code = [r for r in filtered if not _github_links(r.payload)]
+
+        if with_code:
+            results = (with_code[:1] + without_code[:TARGET - 1])[:TARGET]
+        else:
+            results = without_code[:TARGET]
+
+        context_hits  = results[:2]
         context_parts = []
         for r in context_hits:
             p     = r.payload
@@ -139,12 +222,15 @@ def query_rag(question: str, session_id: str, pdf_bytes: bytes = None) -> dict:
 
         if pdf_text:
             user_msg = (
-                f"The user has uploaded a PDF. Here is its full text:\n\n{pdf_text}\n\n"
-                f"---\n\nHere are similar papers from the knowledge base:\n{qdrant_context}\n\n"
-                f"Question: {question}"
+                f"Question: {question}\n\n"
+                f"The user uploaded a PDF — answer relative to this document specifically:\n\n{pdf_text}\n\n"
+                f"---\nRelated papers for additional context (use only if relevant):\n{qdrant_context}"
             )
         else:
-            user_msg = f"Context from research papers:\n{qdrant_context}\n\nQuestion: {question}"
+            user_msg = (
+                f"Question: {question}\n\n"
+                f"---\nRelated papers for reference (cite when useful, don't force-fit):\n{qdrant_context}"
+            )
 
         for r in results:
             p = r.payload
@@ -167,19 +253,84 @@ def query_rag(question: str, session_id: str, pdf_bytes: bytes = None) -> dict:
     else:
         user_msg = question
 
-    messages = list(history)
-    messages.append({"role": "user", "content": user_msg})
+    api_messages = list(history)
+    api_messages.append({"role": "user", "content": user_msg})
+    return api_messages, sources, history
 
-    response = _client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-        messages=messages,
-    )
 
-    answer = response.content[0].text
+def query_rag(question: str, session_id: str, pdf_bytes: bytes = None, preloaded_history: list = None, model: str = "claude-sonnet-4-6") -> dict:
+    api_messages, sources, history = _prepare_query(question, session_id, pdf_bytes, preloaded_history)
+
+    max_tool_rounds = 3
+    answer = ""
+
+    for _ in range(max_tool_rounds + 1):
+        response = _client.messages.create(
+            model=model,
+            max_tokens=2048,
+            system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=api_messages,
+            tools=[FETCH_URL_TOOL],
+        )
+
+        if response.stop_reason == "tool_use":
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    content = _execute_fetch(block.input.get("url", ""))
+                    tool_results.append({
+                        "type":        "tool_result",
+                        "tool_use_id": block.id,
+                        "content":     content,
+                    })
+            api_messages.append({"role": "assistant", "content": response.content})
+            api_messages.append({"role": "user",      "content": tool_results})
+        else:
+            answer = next((b.text for b in response.content if hasattr(b, "text")), "")
+            break
 
     history.append({"role": "user",      "content": question})
     history.append({"role": "assistant", "content": answer})
 
     return {"answer": answer, "sources": sources}
+
+
+def query_rag_stream(question: str, session_id: str, pdf_bytes: bytes = None, preloaded_history: list = None, model: str = "claude-sonnet-4-6"):
+    import json
+    api_messages, sources, history = _prepare_query(question, session_id, pdf_bytes, preloaded_history)
+
+    max_tool_rounds = 3
+    answer = ""
+
+    for _ in range(max_tool_rounds + 1):
+        with _client.messages.stream(
+            model=model,
+            max_tokens=2048,
+            system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            messages=api_messages,
+            tools=[FETCH_URL_TOOL],
+        ) as stream:
+            for text in stream.text_stream:
+                answer += text
+                yield f"data: {json.dumps({'type': 'token', 'text': text})}\n\n"
+            final_msg = stream.get_final_message()
+
+        if final_msg.stop_reason == "tool_use":
+            tool_results = []
+            for block in final_msg.content:
+                if block.type == "tool_use":
+                    content = _execute_fetch(block.input.get("url", ""))
+                    tool_results.append({
+                        "type":        "tool_result",
+                        "tool_use_id": block.id,
+                        "content":     content,
+                    })
+            api_messages.append({"role": "assistant", "content": final_msg.content})
+            api_messages.append({"role": "user",      "content": tool_results})
+        else:
+            break
+
+    history.append({"role": "user",      "content": question})
+    history.append({"role": "assistant", "content": answer})
+
+    yield f"data: {json.dumps({'type': 'done', 'sources': sources})}\n\n"

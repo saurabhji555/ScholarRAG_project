@@ -1,7 +1,8 @@
 import { useState, useRef } from "react";
 import { Upload, X, FileText } from "lucide-react";
+import API_URL from "../api";
 
-export default function ChatInput({ username = "User", onResponse, sessionId = "default" }) {
+export default function ChatInput({ onStreamStart, onToken, onStreamEnd, sessionId = "default", token = "", model = "claude-sonnet-4-6" }) {
   const [input, setInput]     = useState("");
   const [file, setFile]       = useState(null);
   const [loading, setLoading] = useState(false);
@@ -32,26 +33,48 @@ export default function ChatInput({ username = "User", onResponse, sessionId = "
   const handleSend = async () => {
     if (!input.trim()) return;
     const question = input;
+    const fileName = file?.name || null;
 
     setLoading(true);
     setInput("");
     setFile(null);
 
+    if (onStreamStart) onStreamStart(question, fileName);
+
     try {
       const form = new FormData();
       form.append("question", question);
       form.append("session_id", sessionId);
+      form.append("model", model);
       if (file) form.append("file", file);
 
-      const res = await fetch("http://localhost:8000/query", {
-        method: "POST",
-        body: form,
+      const res = await fetch(`${API_URL}/query/stream`, {
+        method:  "POST",
+        headers: { "Authorization": `Bearer ${token}` },
+        body:    form,
       });
 
-      const data = await res.json();
-      if (onResponse) onResponse(question, data);
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop();
+        for (const part of parts) {
+          if (!part.startsWith("data: ")) continue;
+          try {
+            const data = JSON.parse(part.slice(6));
+            if (data.type === "token" && onToken) onToken(data.text);
+            if (data.type === "done"  && onStreamEnd) onStreamEnd(question, data.sources, fileName);
+          } catch {}
+        }
+      }
     } catch (err) {
-      console.error("Backend error:", err);
+      console.error("Stream error:", err);
     } finally {
       setLoading(false);
     }
@@ -60,7 +83,6 @@ export default function ChatInput({ username = "User", onResponse, sessionId = "
   return (
     <div className="w-full flex flex-col items-center gap-2">
 
-      {/* File badge */}
       {file && (
         <div className="w-full max-w-3xl flex items-center gap-2 px-3 py-2 bg-slate-800 border border-indigo-700 rounded-xl">
           <FileText size={14} className="text-indigo-400 flex-shrink-0" />
@@ -74,18 +96,14 @@ export default function ChatInput({ username = "User", onResponse, sessionId = "
         </div>
       )}
 
-      {/* Input box — also the drop target */}
       <div
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         className={`w-full max-w-3xl bg-slate-900 border rounded-2xl p-3 flex items-center gap-3 shadow-lg transition-colors ${
-          dragging
-            ? "border-indigo-500 bg-slate-800"
-            : "border-slate-700"
+          dragging ? "border-indigo-500 bg-slate-800" : "border-slate-700"
         }`}
       >
-        {/* Upload button */}
         <label className="cursor-pointer flex items-center justify-center w-9 h-9 rounded-lg bg-slate-800 hover:bg-slate-700 transition flex-shrink-0">
           <Upload size={16} className="text-slate-300" />
           <input

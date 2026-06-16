@@ -1,9 +1,18 @@
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
+import API_URL from "./api";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { FileText } from "lucide-react";
 import Sidebar from "./components/Sidebar";
 import ChatInput from "./components/ChatInput";
 import SourcesPanel from "./components/SourcesPanel";
+import Login from "./components/Login";
+import Register from "./components/Register";
 
 function makeSessionId() {
   return `session_${Date.now()}_${Math.random().toString(36).slice(2)}`;
@@ -56,17 +65,39 @@ const markdownComponents = {
     </blockquote>
   ),
   hr: () => <hr className="border-slate-700 my-4" />,
-  pre: ({ children }) => (
-    <pre className="bg-slate-900 border border-slate-700 rounded-xl p-4 overflow-x-auto mb-3 my-2 text-sm font-mono">
-      {children}
-    </pre>
-  ),
+  pre: ({ children }) => <>{children}</>,
   code: ({ className, children }) => {
-    const isBlock = /language-(\w+)/.exec(className || "");
-    return isBlock ? (
-      <code className="text-green-300 font-mono text-sm">{children}</code>
-    ) : (
-      <code className="bg-slate-700 text-indigo-300 px-1.5 py-0.5 rounded text-sm font-mono">
+    const match = /language-(\w+)/.exec(className || "");
+    const language = match ? match[1] : "";
+    const code = String(children).replace(/\n$/, "");
+
+    if (match) {
+      return (
+        <div className="rounded-xl overflow-hidden border border-slate-700 my-3 text-sm">
+          <div className="flex items-center justify-between px-4 py-1.5 bg-[#1e1e1e] border-b border-slate-700">
+            <span className="text-xs text-slate-400 font-mono">{language}</span>
+            <button
+              onClick={() => navigator.clipboard.writeText(code)}
+              className="text-xs text-slate-500 hover:text-slate-300 transition"
+            >
+              copy
+            </button>
+          </div>
+          <SyntaxHighlighter
+            language={language}
+            style={vscDarkPlus}
+            customStyle={{ margin: 0, borderRadius: 0, background: "#1e1e1e", padding: "1rem" }}
+            showLineNumbers={true}
+            lineNumberStyle={{ color: "#4a5568", minWidth: "2.5em" }}
+          >
+            {code}
+          </SyntaxHighlighter>
+        </div>
+      );
+    }
+
+    return (
+      <code className="bg-slate-800 text-indigo-300 px-1.5 py-0.5 rounded text-sm font-mono">
         {children}
       </code>
     );
@@ -96,51 +127,164 @@ const markdownComponents = {
 };
 
 export default function App() {
-  const [user, setUser]         = useState(null);
-  const [messages, setMessages] = useState([]);
-  const [sources, setSources]   = useState([]);
-  const [history, setHistory]   = useState([]);
-  const sessionId               = useRef(makeSessionId());
-  const bottomRef               = useRef(null);
+  const [token, setToken]       = useState(() => localStorage.getItem("token"));
+  const [user, setUser]         = useState(() => {
+    try { return JSON.parse(localStorage.getItem("user")); } catch { return null; }
+  });
+  const [authPage, setAuthPage]     = useState("login");
+  const [messages, setMessages]       = useState([]);
+  const [sources, setSources]         = useState([]);
+  const [history, setHistory]         = useState([]);
+  const [streamingText, setStreamingText] = useState(null);
+  const [model, setModel] = useState(() => localStorage.getItem("preferredModel") || "claude-sonnet-4-6");
+  const sessionId         = useRef(localStorage.getItem("sessionId") || makeSessionId());
+  const bottomRef         = useRef(null);
+  const streamingAnswerRef = useRef("");
+
+  useEffect(() => {
+    localStorage.setItem("sessionId", sessionId.current);
+  }, []);
+
+  useEffect(() => {
+    if (!token) return;
+    fetch(`${API_URL}/chats`, {
+      headers: { "Authorization": `Bearer ${token}` },
+    })
+      .then(r => r.json())
+      .then(data => {
+        setHistory(data);
+        const current = data.find(c => c.id === `${JSON.parse(localStorage.getItem("user"))?.id}_${sessionId.current}`);
+        if (current) {
+          setMessages(current.messages);
+          setSources(current.sources);
+        }
+      })
+      .catch(() => {});
+  }, [token]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, streamingText]);
 
-  const handleResponse = (question, data) => {
-    setMessages((prev) => {
-      const updated = [
-        ...prev,
-        { role: "user", text: question },
-        { role: "assistant", text: data.answer },
-      ];
+  const handleLogin = (newToken, newUser) => {
+    localStorage.setItem("token", newToken);
+    localStorage.setItem("user", JSON.stringify(newUser));
+    setToken(newToken);
+    setUser(newUser);
+  };
 
-      setHistory((prevH) => {
-        const idx = prevH.findIndex((h) => h.id === sessionId.current);
-        if (idx === -1) {
-          return [
-            { id: sessionId.current, title: question.slice(0, 40), messages: updated, sources: data.sources },
-            ...prevH,
-          ];
-        }
-        const copy = [...prevH];
-        copy[idx] = { ...copy[idx], messages: updated, sources: data.sources };
-        return copy;
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    localStorage.removeItem("user");
+    localStorage.removeItem("sessionId");
+    setToken(null);
+    setUser(null);
+    setMessages([]);
+    setSources([]);
+    setHistory([]);
+  };
+
+  const handleModelChange = (newModel) => {
+    setModel(newModel);
+    localStorage.setItem("preferredModel", newModel);
+  };
+
+  const handleDelete = async (chatId) => {
+    await fetch(`${API_URL}/chats/${chatId}`, {
+      method:  "DELETE",
+      headers: { "Authorization": `Bearer ${token}` },
+    }).catch(() => null);
+    setHistory(prev => prev.filter(h => h.id !== chatId));
+    if (sessionId.current === chatId) {
+      sessionId.current = makeSessionId();
+      localStorage.setItem("sessionId", sessionId.current);
+      setMessages([]);
+      setSources([]);
+    }
+  };
+
+  const handlePin = async (chatId) => {
+    const res = await fetch(`${API_URL}/chats/${chatId}/pin`, {
+      method:  "POST",
+      headers: { "Authorization": `Bearer ${token}` },
+    }).catch(() => null);
+    if (!res?.ok) return;
+    const data = await res.json();
+    setHistory(prev => prev.map(h => h.id === chatId ? { ...h, pinned: data.pinned } : h));
+  };
+
+  const handleStar = async (chatId) => {
+    const res = await fetch(`${API_URL}/chats/${chatId}/star`, {
+      method:  "POST",
+      headers: { "Authorization": `Bearer ${token}` },
+    }).catch(() => null);
+    if (!res?.ok) return;
+    const data = await res.json();
+    setHistory(prev => prev.map(h => h.id === chatId ? { ...h, starred: data.starred } : h));
+  };
+
+  if (!token || !user) {
+    return authPage === "login"
+      ? <Login onLogin={handleLogin} onSwitch={() => setAuthPage("register")} />
+      : <Register onLogin={handleLogin} onSwitch={() => setAuthPage("login")} />;
+  }
+
+  const handleStreamStart = (question, fileName) => {
+    streamingAnswerRef.current = "";
+    setStreamingText("");
+    setMessages(prev => [
+      ...prev,
+      ...(fileName ? [{ role: "document", text: fileName }] : []),
+      { role: "user", text: question },
+    ]);
+  };
+
+  const handleToken = (text) => {
+    streamingAnswerRef.current += text;
+    setStreamingText(streamingAnswerRef.current);
+  };
+
+  const handleStreamEnd = (question, newSources, fileName) => {
+    const finalAnswer = streamingAnswerRef.current;
+    streamingAnswerRef.current = "";
+    setStreamingText(null);
+
+    setMessages(prev => {
+      const withAssistant = [...prev, { role: "assistant", text: finalAnswer }];
+      setSources(prevSrc => {
+        const existingKeys = new Set(prevSrc.map(s => s.arxiv_id || s.title));
+        const added = (newSources || []).filter(s => !existingKeys.has(s.arxiv_id || s.title));
+        const merged = [...added, ...prevSrc];
+        setHistory(prevH => {
+          const idx = prevH.findIndex(h => h.id === sessionId.current);
+          if (idx === -1) {
+            return [
+              { id: sessionId.current, title: question.slice(0, 40), messages: withAssistant, sources: merged },
+              ...prevH,
+            ];
+          }
+          const copy = [...prevH];
+          copy[idx] = { ...copy[idx], messages: withAssistant, sources: merged };
+          return copy;
+        });
+        return merged;
       });
-
-      return updated;
+      return withAssistant;
     });
-    setSources(data.sources);
   };
 
   const handleNewChat = async () => {
-    await fetch("http://localhost:8000/clear", {
+    await fetch(`${API_URL}/clear`, {
       method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ session_id: sessionId.current }),
+      headers: {
+        "Content-Type":  "application/json",
+        "Authorization": `Bearer ${token}`,
+      },
+      body: JSON.stringify({ session_id: sessionId.current }),
     }).catch(() => {});
 
     sessionId.current = makeSessionId();
+    localStorage.setItem("sessionId", sessionId.current);
     setMessages([]);
     setSources([]);
   };
@@ -156,11 +300,16 @@ export default function App() {
 
       <Sidebar
         user={user}
-        setUser={setUser}
         onNewChat={handleNewChat}
+        onLogout={handleLogout}
         history={history}
         onLoadHistory={handleLoadHistory}
         activeId={sessionId.current}
+        onPin={handlePin}
+        onStar={handleStar}
+        onDelete={handleDelete}
+        model={model}
+        onModelChange={handleModelChange}
       />
 
       {/* Center chat area */}
@@ -181,12 +330,17 @@ export default function App() {
                 <div
                   key={i}
                   className={`px-6 py-3 ${
-                    msg.role === "user"
+                    msg.role === "user" || msg.role === "document"
                       ? "flex justify-end"
                       : "flex justify-start"
                   }`}
                 >
-                  {msg.role === "assistant" ? (
+                  {msg.role === "document" ? (
+                    <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 border border-indigo-800/50 rounded-lg text-xs text-slate-400 max-w-xs">
+                      <FileText size={12} className="text-indigo-400 flex-shrink-0" />
+                      <span className="truncate">{msg.text}</span>
+                    </div>
+                  ) : msg.role === "assistant" ? (
                     <div className="flex gap-4 w-full max-w-3xl">
                       {/* Avatar */}
                       <div className="w-8 h-8 rounded-full bg-indigo-600 flex-shrink-0 flex items-center justify-center mt-0.5 shadow-lg">
@@ -195,7 +349,8 @@ export default function App() {
                       {/* Content — no box, clean text */}
                       <div className="flex-1 min-w-0 text-base">
                         <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
+                          remarkPlugins={[remarkGfm, remarkMath]}
+                          rehypePlugins={[rehypeKatex]}
                           components={markdownComponents}
                         >
                           {msg.text}
@@ -209,6 +364,28 @@ export default function App() {
                   )}
                 </div>
               ))}
+              {streamingText !== null && (
+                <div className="px-6 py-3 flex justify-start">
+                  <div className="flex gap-4 w-full max-w-3xl">
+                    <div className="w-8 h-8 rounded-full bg-indigo-600 flex-shrink-0 flex items-center justify-center mt-0.5 shadow-lg">
+                      <span className="text-white text-xs font-bold">S</span>
+                    </div>
+                    <div className="flex-1 min-w-0 text-base">
+                      {streamingText ? (
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm, remarkMath]}
+                          rehypePlugins={[rehypeKatex]}
+                          components={markdownComponents}
+                        >
+                          {streamingText}
+                        </ReactMarkdown>
+                      ) : (
+                        <span className="inline-block w-2 h-4 bg-indigo-400 animate-pulse rounded-sm" />
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
               <div ref={bottomRef} />
             </div>
           )}
@@ -217,9 +394,12 @@ export default function App() {
         {/* Input at bottom */}
         <div className="px-6 pb-6 pt-2 border-t border-slate-800/50">
           <ChatInput
-            username={user ? user.name : "Guest"}
-            onResponse={handleResponse}
+            onStreamStart={handleStreamStart}
+            onToken={handleToken}
+            onStreamEnd={handleStreamEnd}
             sessionId={sessionId.current}
+            token={token}
+            model={model}
           />
         </div>
       </div>
