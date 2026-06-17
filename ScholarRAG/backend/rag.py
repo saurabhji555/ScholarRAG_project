@@ -105,7 +105,6 @@ FETCH_URL_TOOL = {
         },
         "required": ["url"],
     },
-    "cache_control": {"type": "ephemeral"},
 }
 
 
@@ -268,7 +267,8 @@ def query_rag(question: str, session_id: str, pdf_bytes: bytes = None, preloaded
         response = _client.messages.create(
             model=model,
             max_tokens=2048,
-            system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            cache_control={"type": "ephemeral"},
+            system=[{"type": "text", "text": SYSTEM_PROMPT}],
             messages=api_messages,
             tools=[FETCH_URL_TOOL],
         )
@@ -306,7 +306,8 @@ def query_rag_stream(question: str, session_id: str, pdf_bytes: bytes = None, pr
         with _client.messages.stream(
             model=model,
             max_tokens=2048,
-            system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
+            cache_control={"type": "ephemeral"},
+            system=[{"type": "text", "text": SYSTEM_PROMPT}],
             messages=api_messages,
             tools=[FETCH_URL_TOOL],
         ) as stream:
