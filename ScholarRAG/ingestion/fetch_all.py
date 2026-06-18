@@ -438,7 +438,14 @@ def enrich_github(papers: list, test: bool):
 
 # ── Phase 3b ───────────────────────────────────────────────────────────────────
 
+S2_BATCH_URL = "https://api.semanticscholar.org/graph/v1/paper/batch"
+S2_FIELDS    = "citationCount,externalIds"
+
+
 def enrich_citations(papers: list, test: bool):
+    s2_key = os.getenv("S2_API_KEY", "")
+    s2_headers = {"x-api-key": s2_key} if s2_key else {}
+
     tprint("[Citations] Loading cache ...")
     cache: dict = {}
     if CIT_CACHE.exists():
@@ -448,8 +455,7 @@ def enrich_citations(papers: list, test: bool):
         except Exception:
             cache = {}
 
-    doi_index:   dict[str, dict] = {}
-    arxiv_index: dict[str, dict] = {}
+    s2_index: dict[str, dict] = {}
 
     for p in papers:
         if p.get("source") == "openalex":
@@ -457,102 +463,62 @@ def enrich_citations(papers: list, test: bool):
         doi      = (p.get("doi") or "").strip()
         arxiv_id = (p.get("arxiv_id") or "").strip()
 
-        doi_key   = f"doi:{doi}"     if doi      else None
-        arxiv_key = f"arxiv:{arxiv_id}" if arxiv_id else None
-
-        if doi_key and doi_key in cache:
-            p["citations"] = cache[doi_key]
-        elif arxiv_key and arxiv_key in cache:
-            p["citations"] = cache[arxiv_key]
-        elif doi:
-            doi_index[doi] = p
+        if doi:
+            key = f"DOI:{doi}"
         elif arxiv_id:
-            arxiv_index[arxiv_id] = p
+            key = f"arXiv:{arxiv_id}"
+        else:
+            continue
 
-    tprint(
-        f"[Citations] {len(cache):,} from cache | "
-        f"{len(doi_index):,} via DOI | {len(arxiv_index):,} via arxiv"
-    )
+        if key in cache:
+            p["citations"] = cache[key]
+        else:
+            s2_index[key] = p
+
+    tprint(f"[Citations] {len(cache):,} from cache | {len(s2_index):,} to fetch via S2")
 
     enriched   = 0
-    batch_size = 100
+    batch_size = 500
     SAVE_EVERY = 5_000
 
-    doi_list = list(doi_index.keys())
+    s2_keys = list(s2_index.keys())
     if test:
-        doi_list = doi_list[:200]
+        s2_keys = s2_keys[:200]
 
-    for i in range(0, len(doi_list), batch_size):
-        batch = doi_list[i:i + batch_size]
+    for i in range(0, len(s2_keys), batch_size):
+        batch = s2_keys[i:i + batch_size]
         try:
-            r = requests.get(
-                OA_BASE,
-                headers=OA_HEADERS,
-                params={
-                    "filter":   "doi:" + "|".join(batch),
-                    "select":   "doi,cited_by_count",
-                    "per_page": batch_size,
-                },
+            r = requests.post(
+                S2_BATCH_URL,
+                headers={**s2_headers, "Content-Type": "application/json"},
+                params={"fields": S2_FIELDS},
+                json={"ids": batch},
                 timeout=30,
             )
             if r.status_code == 429:
-                time.sleep(30)
+                tprint("[Citations] S2 rate limited — sleeping 60s")
+                time.sleep(60)
                 continue
             if r.status_code == 200:
-                for w in r.json().get("results", []):
-                    doi = (w.get("doi") or "").replace("https://doi.org/", "").strip()
-                    p   = doi_index.get(doi)
-                    if p:
-                        count = w.get("cited_by_count", 0)
-                        p["citations"]     = count
-                        cache[f"doi:{doi}"] = count
+                for item in r.json():
+                    if not item or "citationCount" not in item:
+                        continue
+                    paper_id = (item.get("paperId") or "").strip()
+                    count    = item.get("citationCount", 0)
+                    s2_id    = (item.get("externalIds") or {})
+                    doi_val  = (s2_id.get("DOI") or "").strip()
+                    arxiv_val= (s2_id.get("ArXiv") or "").strip()
+
+                    key = f"DOI:{doi_val}" if doi_val and f"DOI:{doi_val}" in s2_index \
+                          else f"arXiv:{arxiv_val}" if arxiv_val else None
+                    if key and key in s2_index:
+                        s2_index[key]["citations"] = count
+                        cache[key] = count
                         enriched += 1
         except Exception as e:
-            tprint(f"[Citations] DOI batch error: {e}")
+            tprint(f"[Citations] S2 batch error: {e}")
 
-        time.sleep(0.15)
-
-        if enriched > 0 and enriched % SAVE_EVERY == 0:
-            with open(CIT_CACHE, "w", encoding="utf-8") as f:
-                json.dump(cache, f)
-            tprint(f"[Citations] checkpoint {enriched:,} enriched", flush=True)
-
-    arxiv_list = list(arxiv_index.keys())
-    if test:
-        arxiv_list = arxiv_list[:200]
-
-    for i in range(0, len(arxiv_list), batch_size):
-        batch = arxiv_list[i:i + batch_size]
-        try:
-            r = requests.get(
-                OA_BASE,
-                headers=OA_HEADERS,
-                params={
-                    "filter":   "ids.arxiv:" + "|".join(
-                        f"https://arxiv.org/abs/{aid}" for aid in batch
-                    ),
-                    "select":   "ids,cited_by_count",
-                    "per_page": batch_size,
-                },
-                timeout=30,
-            )
-            if r.status_code == 429:
-                time.sleep(30)
-                continue
-            if r.status_code == 200:
-                for w in r.json().get("results", []):
-                    ext = w.get("ids") or {}
-                    aid = (ext.get("arxiv") or "").replace("https://arxiv.org/abs/", "").strip()
-                    p   = arxiv_index.get(aid)
-                    if p:
-                        count = w.get("cited_by_count", 0)
-                        p["citations"]        = count
-                        cache[f"arxiv:{aid}"] = count
-                        enriched += 1
-        except Exception as e:
-            tprint(f"[Citations] ArXiv batch error: {e}")
-
-        time.sleep(0.15)
+        time.sleep(1)
 
         if enriched > 0 and enriched % SAVE_EVERY == 0:
             with open(CIT_CACHE, "w", encoding="utf-8") as f:
@@ -562,8 +528,7 @@ def enrich_citations(papers: list, test: bool):
     with open(CIT_CACHE, "w", encoding="utf-8") as f:
         json.dump(cache, f)
 
-    total = len(doi_index) + len(arxiv_index)
-    tprint(f"[Citations] done — {enriched:,}/{total:,} enriched")
+    tprint(f"[Citations] done — {enriched:,}/{len(s2_keys):,} enriched")
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
