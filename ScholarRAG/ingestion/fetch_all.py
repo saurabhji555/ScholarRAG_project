@@ -30,11 +30,18 @@ PWC_ABSTRACTS_DS = "pwc-archive/papers-with-abstracts"
 OA_BASE    = "https://api.openalex.org/works"
 OA_HEADERS = {"User-Agent": "ScholarRAG/1.0 (mailto:24f3003029@ds.study.iitm.ac.in)"}
 
-OA_FIELDS = [
-    "Medicine", "Biology", "Astronomy", "Chemistry",
-    "Environmental Science", "Psychology", "Economics",
-    "Physics", "Political Science", "History",
-]
+OA_FIELDS = {
+    "Medicine":             "C71924100",
+    "Biology":              "C86803240",
+    "Astronomy":            "C185592680",
+    "Chemistry":            "C185333966",
+    "Environmental Science":"C39432304",
+    "Psychology":           "C15744967",
+    "Economics":            "C162324750",
+    "Physics":              "C121332964",
+    "Political Science":    "C17744445",
+    "History":              "C95457728",
+}
 OA_YEARS    = list(range(2014, 2026))
 OA_PER_YEAR = 100
 
@@ -245,7 +252,7 @@ def fetch_openalex(test: bool) -> list:
     new    = 0
     SAVE_EVERY = 1_000
 
-    for field in OA_FIELDS:
+    for field, concept_id in OA_FIELDS.items():
         field_count = 0
         for year in years:
             pair = f"{field}_{year}"
@@ -257,12 +264,12 @@ def fetch_openalex(test: bool) -> list:
                     OA_BASE,
                     headers=OA_HEADERS,
                     params={
-                        "filter":   f"topics.display_name:{field},publication_year:{year},has_abstract:true",
+                        "filter":   f"concepts.id:{concept_id},publication_year:{year},has_abstract:true",
                         "sort":     "cited_by_count:desc",
                         "per_page": per_yr,
                         "select":   "id,doi,display_name,authorships,publication_year,"
                                     "primary_location,abstract_inverted_index,"
-                                    "cited_by_count,topics,ids",
+                                    "cited_by_count,concepts,ids",
                     },
                     timeout=30,
                 )
@@ -300,9 +307,9 @@ def fetch_openalex(test: bool) -> list:
                     pdf_url  = loc.get("pdf_url") or loc.get("landing_page_url") or ""
 
                     concepts = [
-                        t.get("display_name", "")
-                        for t in (w.get("topics") or [])
-                        if t.get("score", 0) >= 0.3
+                        c.get("display_name", "")
+                        for c in (w.get("concepts") or [])
+                        if c.get("score", 0) >= 0.3
                     ]
 
                     ext_ids  = w.get("ids") or {}
