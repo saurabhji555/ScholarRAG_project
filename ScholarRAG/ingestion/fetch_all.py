@@ -494,23 +494,27 @@ def enrich_citations(papers: list, test: bool):
         s2_keys = s2_keys[:200]
 
     for i in range(0, len(s2_keys), batch_size):
-        time.sleep(1)
         batch = s2_keys[i:i + batch_size]
-        try:
-            r = requests.post(
-                S2_BATCH_URL,
-                headers={**s2_headers, "Content-Type": "application/json"},
-                params={"fields": S2_FIELDS},
-                json={"ids": batch},
-                timeout=30,
-            )
+        while True:
+            time.sleep(1)
+            try:
+                r = requests.post(
+                    S2_BATCH_URL,
+                    headers={**s2_headers, "Content-Type": "application/json"},
+                    params={"fields": S2_FIELDS},
+                    json={"ids": batch},
+                    timeout=30,
+                )
+            except Exception as e:
+                tprint(f"[Citations] S2 request error: {e}")
+                break
             if r.status_code == 429:
-                tprint("[Citations] S2 rate limited — sleeping 60s")
+                tprint(f"[Citations] S2 rate limited — sleeping 60s | {r.text[:200]}")
                 time.sleep(60)
                 continue
             if r.status_code != 200:
                 tprint(f"[Citations] S2 error {r.status_code}: {r.text[:200]}")
-                continue
+                break
             for j, item in enumerate(r.json()):
                 if not item or "citationCount" not in item:
                     continue
@@ -519,8 +523,7 @@ def enrich_citations(papers: list, test: bool):
                 s2_index[key]["citations"] = count
                 cache[key] = count
                 enriched += 1
-        except Exception as e:
-            tprint(f"[Citations] S2 batch error: {e}")
+            break
 
         if enriched > 0 and enriched % SAVE_EVERY == 0:
             with open(CIT_CACHE, "w", encoding="utf-8") as f:
