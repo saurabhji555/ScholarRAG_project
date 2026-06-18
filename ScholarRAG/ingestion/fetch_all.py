@@ -257,12 +257,12 @@ def fetch_openalex(test: bool) -> list:
                     OA_BASE,
                     headers=OA_HEADERS,
                     params={
-                        "filter":   f"concepts.display_name:{field},publication_year:{year},has_abstract:true",
+                        "filter":   f"topics.display_name:{field},publication_year:{year},has_abstract:true",
                         "sort":     "cited_by_count:desc",
                         "per_page": per_yr,
                         "select":   "id,doi,display_name,authorships,publication_year,"
                                     "primary_location,abstract_inverted_index,"
-                                    "cited_by_count,concepts,ids",
+                                    "cited_by_count,topics,ids",
                     },
                     timeout=30,
                 )
@@ -300,9 +300,9 @@ def fetch_openalex(test: bool) -> list:
                     pdf_url  = loc.get("pdf_url") or loc.get("landing_page_url") or ""
 
                     concepts = [
-                        c.get("display_name", "")
-                        for c in (w.get("concepts") or [])
-                        if c.get("score", 0) >= 0.3
+                        t.get("display_name", "")
+                        for t in (w.get("topics") or [])
+                        if t.get("score", 0) >= 0.3
                     ]
 
                     ext_ids  = w.get("ids") or {}
