@@ -1,11 +1,13 @@
 import { useState, useRef } from "react";
+import { flushSync } from "react-dom";
 import { Upload, X, FileText } from "lucide-react";
 import API_URL from "../api";
 
-export default function ChatInput({ onStreamStart, onToken, onStreamEnd, sessionId = "default", token = "", model = "claude-sonnet-4-6" }) {
+export default function ChatInput({ onStreamStart, onToken, onStreamEnd, onStatus, sessionId = "default", token = "", model = "claude-sonnet-4-6" }) {
   const [input, setInput]     = useState("");
   const [file, setFile]       = useState(null);
   const [loading, setLoading] = useState(false);
+  const [phase, setPhase]     = useState("");
   const [dragging, setDragging] = useState(false);
   const fileInputRef = useRef(null);
 
@@ -36,6 +38,7 @@ export default function ChatInput({ onStreamStart, onToken, onStreamEnd, session
     const fileName = file?.name || null;
 
     setLoading(true);
+    setPhase("Searching...");
     setInput("");
     setFile(null);
 
@@ -68,7 +71,8 @@ export default function ChatInput({ onStreamStart, onToken, onStreamEnd, session
           if (!part.startsWith("data: ")) continue;
           try {
             const data = JSON.parse(part.slice(6));
-            if (data.type === "token" && onToken) onToken(data.text);
+            if (data.type === "status") { flushSync(() => setPhase(data.text)); if (onStatus) onStatus(data.text); }
+            if (data.type === "token" && onToken) { setPhase(""); flushSync(() => onToken(data.text)); }
             if (data.type === "done"  && onStreamEnd) onStreamEnd(question, data.sources, fileName);
           } catch {}
         }
@@ -77,11 +81,19 @@ export default function ChatInput({ onStreamStart, onToken, onStreamEnd, session
       console.error("Stream error:", err);
     } finally {
       setLoading(false);
+      setPhase("");
+      if (onStatus) onStatus("");
     }
   };
 
   return (
     <div className="w-full flex flex-col items-center gap-2">
+      {phase && loading && (
+        <div className="w-full max-w-3xl flex items-center gap-2 px-1">
+          <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse flex-shrink-0" />
+          <span className="text-xs text-slate-400">{phase}</span>
+        </div>
+      )}
 
       {file && (
         <div className="w-full max-w-3xl flex items-center gap-2 px-3 py-2 bg-slate-800 border border-indigo-700 rounded-xl">
@@ -129,7 +141,7 @@ export default function ChatInput({ onStreamStart, onToken, onStreamEnd, session
           disabled={loading}
           className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 px-4 py-2 rounded-xl text-[15px] flex-shrink-0 transition-colors"
         >
-          {loading ? "Thinking..." : "Send"}
+          {loading ? (phase || "Thinking...") : "Send"}
         </button>
       </div>
 

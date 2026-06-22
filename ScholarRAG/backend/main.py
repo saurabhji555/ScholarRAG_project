@@ -32,7 +32,7 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["http://localhost:5173", "http://13.206.126.59:5173"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -179,10 +179,10 @@ async def query_stream(
     ]
     db.close()
 
-    def event_generator():
+    async def event_generator():
         answer  = ""
         sources = []
-        for chunk in query_rag_stream(question, scoped_session, pdf_bytes, preloaded_history=preloaded, model=model):
+        async for chunk in query_rag_stream(question, scoped_session, pdf_bytes, preloaded_history=preloaded, model=model):
             if chunk.startswith("data: "):
                 try:
                     data = _json.loads(chunk[6:])

@@ -25,6 +25,7 @@ CIT_CACHE      = Path("ingestion/citations_cache.json")
 ENRICHED_FILE  = Path("ingestion/papers_enriched.json")
 PROGRESS_FILE  = Path("ingestion/fetch_progress.json")
 PWC_LINKS_FILE = Path("ingestion/pwc_links.json")
+STARS_CACHE    = Path("ingestion/github_stars.json")
 
 PWC_ABSTRACTS_DS = "pwc-archive/papers-with-abstracts"
 OA_BASE    = "https://api.openalex.org/works"
@@ -443,6 +444,19 @@ def enrich_github(papers: list, test: bool):
 
     tprint(f"[GitHub] matched {matched:,} papers")
 
+    if STARS_CACHE.exists():
+        with open(STARS_CACHE, encoding="utf-8") as f:
+            stars_cache = json.load(f)
+        applied = 0
+        for p in papers:
+            repos = p.get("github_repos") or []
+            if repos:
+                p["repo_stars"] = [stars_cache.get(url, 0) for url in repos]
+                p["max_stars"]  = max(p["repo_stars"], default=0)
+                if p["max_stars"] > 0:
+                    applied += 1
+        tprint(f"[GitHub] applied stars to {applied:,} papers from cache")
+
 
 # ── Phase 3b ───────────────────────────────────────────────────────────────────
 
@@ -632,7 +646,8 @@ def main(test: bool):
     pwc_c  = sum(1 for p in all_papers if p.get("source") == "pwc")
     oa_c   = sum(1 for p in all_papers if p.get("source") == "openalex")
     code_c = sum(1 for p in all_papers if p.get("has_code"))
-    cit_c  = sum(1 for p in all_papers if p.get("citations", 0) > 0)
+    cit_c   = sum(1 for p in all_papers if p.get("citations", 0) > 0)
+    stars_c = sum(1 for p in all_papers if p.get("max_stars", 0) > 0)
 
     print(f"\n{'='*60}")
     print(f"DONE — {len(all_papers):,} papers → {ENRICHED_FILE}")
@@ -640,6 +655,7 @@ def main(test: bool):
     print(f"  OpenAlex        : {oa_c:,}")
     print(f"  With GitHub     : {code_c:,}")
     print(f"  With citations  : {cit_c:,}")
+    print(f"  With stars      : {stars_c:,}")
     print(f"{'='*60}")
 
 

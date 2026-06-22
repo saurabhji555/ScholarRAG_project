@@ -28,7 +28,7 @@ function MetaRow({ icon: Icon, label, children }) {
   );
 }
 
-export default function SourcesPanel({ sources = [] }) {
+export default function SourcesPanel({ sources = [], latestKeys = new Set() }) {
   const [query, setQuery] = useState("");
 
   const filtered = query.trim()
@@ -72,6 +72,7 @@ export default function SourcesPanel({ sources = [] }) {
         ) : (
           <div className="space-y-3">
             {filtered.map((src, i) => {
+              const isNew         = latestKeys.has(src.arxiv_id || src.title);
               const year          = src.published ? src.published.slice(0, 4) : "";
               const authors       = Array.isArray(src.authors) ? src.authors : [];
               const displayAuthors = authors.length > 0
@@ -94,6 +95,7 @@ export default function SourcesPanel({ sources = [] }) {
                   <div className="flex items-center justify-between px-3 py-2 bg-slate-800/50 border-b border-slate-800 gap-2">
                     <div className="flex items-center gap-2">
                       <span className="text-xs font-bold text-slate-500">#{i + 1}</span>
+                      {isNew && <span className="w-1.5 h-1.5 rounded-full bg-green-400 flex-shrink-0" title="From latest response" />}
                       {src.has_code && (
                         <span className="text-xs px-1.5 py-0.5 rounded bg-emerald-900/50 text-emerald-400 border border-emerald-800 font-medium">
                           Code

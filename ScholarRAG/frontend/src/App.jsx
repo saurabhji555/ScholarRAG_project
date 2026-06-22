@@ -134,6 +134,7 @@ export default function App() {
   const [authPage, setAuthPage]     = useState("login");
   const [messages, setMessages]       = useState([]);
   const [sources, setSources]         = useState([]);
+  const [latestKeys, setLatestKeys]   = useState(new Set());
   const [history, setHistory]         = useState([]);
   const [streamingText, setStreamingText] = useState(null);
   const [model, setModel] = useState(() => localStorage.getItem("preferredModel") || "claude-sonnet-4-6");
@@ -249,6 +250,8 @@ export default function App() {
     streamingAnswerRef.current = "";
     setStreamingText(null);
 
+    setLatestKeys(new Set((newSources || []).map(s => s.arxiv_id || s.title).filter(Boolean)));
+
     setMessages(prev => {
       const withAssistant = [...prev, { role: "assistant", text: finalAnswer }];
       setSources(prevSrc => {
@@ -293,6 +296,7 @@ export default function App() {
     sessionId.current = entry.id;
     setMessages(entry.messages);
     setSources(entry.sources);
+    setLatestKeys(new Set());
   };
 
   return (
@@ -404,7 +408,7 @@ export default function App() {
         </div>
       </div>
 
-      <SourcesPanel sources={sources} />
+      <SourcesPanel sources={sources} latestKeys={latestKeys} />
 
     </div>
   );

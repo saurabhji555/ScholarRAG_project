@@ -37,17 +37,19 @@ If the user asks which AI model or technology powers YOU specifically — respon
 _embeddings    = None
 _qdrant        = None
 _client        = None
+_async_client  = None
 _cross_encoder = None
 
 _memories: dict[str, list] = {}
 
 
 def init():
-    global _embeddings, _qdrant, _client, _cross_encoder
+    global _embeddings, _qdrant, _client, _async_client, _cross_encoder
 
     _embeddings    = HuggingFaceEmbeddings(model_name=MODEL_NAME)
     _qdrant        = QdrantClient(path=QDRANT_PATH)
     _client        = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    _async_client  = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     _cross_encoder = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 
@@ -146,7 +148,7 @@ def _hyde_query(question: str) -> str:
     try:
         resp = _client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=150,
+            max_tokens=80,
             messages=[{
                 "role": "user",
                 "content": (
@@ -165,25 +167,17 @@ def _prepare_query(question: str, session_id: str, pdf_bytes: bytes = None, prel
     if session_id not in _memories and preloaded_history:
         _memories[session_id] = preloaded_history
     history = _get_memory(session_id)
-    intent  = _classify_query(question)
     sources = []
 
-    if intent == "research":
-        pdf_text = _extract_pdf_text(pdf_bytes) if pdf_bytes else None
-        hyde_abstract = _hyde_query(question)
-        search_text   = f"{hyde_abstract} {pdf_text[:1500]}" if pdf_text else hyde_abstract
+    if True:
+        pdf_text    = _extract_pdf_text(pdf_bytes) if pdf_bytes else None
+        search_text = f"{question} {pdf_text[:1500]}" if pdf_text else question
 
-        SCORE_THRESHOLD = 0.45
-        TARGET = 2
+        SCORE_THRESHOLD = 0.35
+        TARGET          = 3
 
-        candidates = _search(search_text, k=15)
-        filtered   = [r for r in candidates if r.score >= SCORE_THRESHOLD]
-
-        if filtered and _cross_encoder:
-            pairs     = [[question, f"{r.payload.get('title','')}. {r.payload.get('summary','')}"] for r in filtered]
-            ce_scores = _cross_encoder.predict(pairs)
-            filtered  = [r for _, r in sorted(zip(ce_scores, filtered), key=lambda x: -x[0])]
-
+        candidates   = _search(search_text, k=8)
+        filtered     = [r for r in candidates if r.score >= SCORE_THRESHOLD]
         with_code    = [r for r in filtered if _github_links(r.payload)]
         without_code = [r for r in filtered if not _github_links(r.payload)]
 
@@ -192,9 +186,8 @@ def _prepare_query(question: str, session_id: str, pdf_bytes: bytes = None, prel
         else:
             results = without_code[:TARGET]
 
-        context_hits  = results[:2]
         context_parts = []
-        for r in context_hits:
+        for r in results[:3]:
             p     = r.payload
             lines = [f"Title: {p.get('title', '')}"]
             year  = (p.get("published") or "")[:4]
@@ -249,9 +242,6 @@ def _prepare_query(question: str, session_id: str, pdf_bytes: bytes = None, prel
                 "doi":             p.get("doi", ""),
                 "fields_of_study": p.get("fields_of_study", []),
             })
-    else:
-        user_msg = question
-
     api_messages = list(history)
     api_messages.append({"role": "user", "content": user_msg})
     return api_messages, sources, history
@@ -295,32 +285,34 @@ def query_rag(question: str, session_id: str, pdf_bytes: bytes = None, preloaded
     return {"answer": answer, "sources": sources}
 
 
-def query_rag_stream(question: str, session_id: str, pdf_bytes: bytes = None, preloaded_history: list = None, model: str = "claude-sonnet-4-6"):
+async def query_rag_stream(question: str, session_id: str, pdf_bytes: bytes = None, preloaded_history: list = None, model: str = "claude-sonnet-4-6"):
     import json
-    api_messages, sources, history = _prepare_query(question, session_id, pdf_bytes, preloaded_history)
+    import asyncio
+    yield f"data: {json.dumps({'type': 'status', 'text': 'Searching papers...'})}\n\n"
+    api_messages, sources, history = await asyncio.to_thread(_prepare_query, question, session_id, pdf_bytes, preloaded_history)
+    yield f"data: {json.dumps({'type': 'status', 'text': 'Generating answer...'})}\n\n"
 
     max_tool_rounds = 3
     answer = ""
 
     for _ in range(max_tool_rounds + 1):
-        with _client.messages.stream(
+        async with _async_client.messages.stream(
             model=model,
             max_tokens=2048,
-            cache_control={"type": "ephemeral"},
-            system=[{"type": "text", "text": SYSTEM_PROMPT}],
+            system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
             messages=api_messages,
             tools=[FETCH_URL_TOOL],
         ) as stream:
-            for text in stream.text_stream:
+            async for text in stream.text_stream:
                 answer += text
                 yield f"data: {json.dumps({'type': 'token', 'text': text})}\n\n"
-            final_msg = stream.get_final_message()
+            final_msg = await stream.get_final_message()
 
         if final_msg.stop_reason == "tool_use":
             tool_results = []
             for block in final_msg.content:
                 if block.type == "tool_use":
-                    content = _execute_fetch(block.input.get("url", ""))
+                    content = await asyncio.to_thread(_execute_fetch, block.input.get("url", ""))
                     tool_results.append({
                         "type":        "tool_result",
                         "tool_use_id": block.id,
