@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { flushSync } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import API_URL from "./api";
 import remarkGfm from "remark-gfm";
@@ -132,19 +133,53 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem("user")); } catch { return null; }
   });
   const [authPage, setAuthPage]     = useState("login");
-  const [messages, setMessages]       = useState([]);
-  const [sources, setSources]         = useState([]);
   const [latestKeys, setLatestKeys]   = useState(new Set());
   const [history, setHistory]         = useState([]);
-  const [streamingText, setStreamingText] = useState(null);
+  const [activeId, setActiveId]       = useState(() => localStorage.getItem("sessionId") || makeSessionId());
+  const [streaming, setStreaming]     = useState({});
   const [model, setModel] = useState(() => localStorage.getItem("preferredModel") || "claude-sonnet-4-6");
-  const sessionId         = useRef(localStorage.getItem("sessionId") || makeSessionId());
+  const [panelWidth, setPanelWidth] = useState(360);
   const bottomRef         = useRef(null);
-  const streamingAnswerRef = useRef("");
+  const streamingRefs     = useRef({});
+  const activeIdRef       = useRef(activeId);
+  const isDragging = useRef(false);
+
+  const activeChat   = history.find(c => c.id === activeId);
+  const messages     = activeChat?.messages || [];
+  const sources      = activeChat?.sources || [];
+  const activeStream = streaming[activeId] || null;
+
+  const handleDragStart = useCallback(() => {
+    isDragging.current = true;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }, []);
+
+  const handleDrag = useCallback((e) => {
+    if (!isDragging.current) return;
+    const newWidth = window.innerWidth - e.clientX;
+    if (newWidth >= 200 && newWidth <= 600) setPanelWidth(newWidth);
+  }, []);
+
+  const handleDragEnd = useCallback(() => {
+    isDragging.current = false;
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  }, []);
 
   useEffect(() => {
-    localStorage.setItem("sessionId", sessionId.current);
-  }, []);
+    window.addEventListener("mousemove", handleDrag);
+    window.addEventListener("mouseup", handleDragEnd);
+    return () => {
+      window.removeEventListener("mousemove", handleDrag);
+      window.removeEventListener("mouseup", handleDragEnd);
+    };
+  }, [handleDrag, handleDragEnd]);
+
+  useEffect(() => {
+    activeIdRef.current = activeId;
+    localStorage.setItem("sessionId", activeId);
+  }, [activeId]);
 
   useEffect(() => {
     if (!token) return;
@@ -152,20 +187,13 @@ export default function App() {
       headers: { "Authorization": `Bearer ${token}` },
     })
       .then(r => r.json())
-      .then(data => {
-        setHistory(data);
-        const current = data.find(c => c.id === `${JSON.parse(localStorage.getItem("user"))?.id}_${sessionId.current}`);
-        if (current) {
-          setMessages(current.messages);
-          setSources(current.sources);
-        }
-      })
+      .then(data => setHistory(data))
       .catch(() => {});
   }, [token]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamingText]);
+  }, [messages.length, activeStream?.text]);
 
   const handleLogin = (newToken, newUser) => {
     localStorage.setItem("token", newToken);
@@ -180,9 +208,10 @@ export default function App() {
     localStorage.removeItem("sessionId");
     setToken(null);
     setUser(null);
-    setMessages([]);
-    setSources([]);
     setHistory([]);
+    setStreaming({});
+    streamingRefs.current = {};
+    setActiveId(makeSessionId());
   };
 
   const handleModelChange = (newModel) => {
@@ -196,12 +225,7 @@ export default function App() {
       headers: { "Authorization": `Bearer ${token}` },
     }).catch(() => null);
     setHistory(prev => prev.filter(h => h.id !== chatId));
-    if (sessionId.current === chatId) {
-      sessionId.current = makeSessionId();
-      localStorage.setItem("sessionId", sessionId.current);
-      setMessages([]);
-      setSources([]);
-    }
+    if (activeId === chatId) setActiveId(makeSessionId());
   };
 
   const handlePin = async (chatId) => {
@@ -230,72 +254,107 @@ export default function App() {
       : <Register onLogin={handleLogin} onSwitch={() => setAuthPage("login")} />;
   }
 
-  const handleStreamStart = (question, fileName) => {
-    streamingAnswerRef.current = "";
-    setStreamingText("");
-    setMessages(prev => [
-      ...prev,
+  const sendQuery = async (question, file) => {
+    const chatId   = activeId;
+    const fileName = file?.name || null;
+
+    const userMsgs = [
       ...(fileName ? [{ role: "document", text: fileName }] : []),
       { role: "user", text: question },
-    ]);
-  };
-
-  const handleToken = (text) => {
-    streamingAnswerRef.current += text;
-    setStreamingText(streamingAnswerRef.current);
-  };
-
-  const handleStreamEnd = (question, newSources, fileName) => {
-    const finalAnswer = streamingAnswerRef.current;
-    streamingAnswerRef.current = "";
-    setStreamingText(null);
-
-    setLatestKeys(new Set((newSources || []).map(s => s.arxiv_id || s.title).filter(Boolean)));
-
-    setMessages(prev => {
-      const withAssistant = [...prev, { role: "assistant", text: finalAnswer }];
-      setSources(prevSrc => {
-        const existingKeys = new Set(prevSrc.map(s => s.arxiv_id || s.title));
-        const added = (newSources || []).filter(s => !existingKeys.has(s.arxiv_id || s.title));
-        const merged = [...added, ...prevSrc];
-        setHistory(prevH => {
-          const idx = prevH.findIndex(h => h.id === sessionId.current);
-          if (idx === -1) {
-            return [
-              { id: sessionId.current, title: question.slice(0, 40), messages: withAssistant, sources: merged },
-              ...prevH,
-            ];
-          }
-          const copy = [...prevH];
-          copy[idx] = { ...copy[idx], messages: withAssistant, sources: merged };
-          return copy;
-        });
-        return merged;
-      });
-      return withAssistant;
+    ];
+    setHistory(prev => {
+      const exists = prev.find(c => c.id === chatId);
+      if (exists) {
+        return prev.map(c => c.id === chatId ? { ...c, messages: [...c.messages, ...userMsgs] } : c);
+      }
+      return [
+        { id: chatId, title: question.slice(0, 40), messages: userMsgs, sources: [], pinned: false, starred: false },
+        ...prev,
+      ];
     });
+
+    streamingRefs.current[chatId] = "";
+    setStreaming(prev => ({ ...prev, [chatId]: { text: "", phase: "Searching..." } }));
+
+    let doneSources = [];
+    try {
+      const form = new FormData();
+      form.append("question", question);
+      form.append("session_id", chatId);
+      form.append("model", model);
+      if (file) form.append("file", file);
+
+      const res = await fetch(`${API_URL}/query/stream`, {
+        method:  "POST",
+        headers: { "Authorization": `Bearer ${token}` },
+        body:    form,
+      });
+
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop();
+        for (const part of parts) {
+          if (!part.startsWith("data: ")) continue;
+          try {
+            const data = JSON.parse(part.slice(6));
+            if (data.type === "status") {
+              setStreaming(prev => ({ ...prev, [chatId]: { text: streamingRefs.current[chatId] || "", phase: data.text } }));
+            }
+            if (data.type === "token") {
+              streamingRefs.current[chatId] = (streamingRefs.current[chatId] || "") + data.text;
+              const apply = () => setStreaming(prev => ({ ...prev, [chatId]: { text: streamingRefs.current[chatId], phase: "" } }));
+              if (chatId === activeIdRef.current) flushSync(apply); else apply();
+            }
+            if (data.type === "done") {
+              doneSources = data.sources || [];
+            }
+          } catch {}
+        }
+      }
+
+      const finalText = streamingRefs.current[chatId] || "";
+      setHistory(prev => prev.map(c => {
+        if (c.id !== chatId) return c;
+        const existingKeys = new Set((c.sources || []).map(s => s.arxiv_id || s.title));
+        const added = doneSources.filter(s => !existingKeys.has(s.arxiv_id || s.title));
+        return {
+          ...c,
+          messages: [...c.messages, { role: "assistant", text: finalText }],
+          sources:  [...added, ...(c.sources || [])],
+        };
+      }));
+      if (chatId === activeIdRef.current) {
+        setLatestKeys(new Set(doneSources.map(s => s.arxiv_id || s.title).filter(Boolean)));
+      }
+    } catch (err) {
+      console.error("Stream error:", err);
+      setHistory(prev => prev.map(c => c.id === chatId
+        ? { ...c, messages: [...c.messages, { role: "assistant", text: "_Sorry — something went wrong with that request._" }] }
+        : c));
+    } finally {
+      delete streamingRefs.current[chatId];
+      setStreaming(prev => {
+        const next = { ...prev };
+        delete next[chatId];
+        return next;
+      });
+    }
   };
 
-  const handleNewChat = async () => {
-    await fetch(`${API_URL}/clear`, {
-      method:  "POST",
-      headers: {
-        "Content-Type":  "application/json",
-        "Authorization": `Bearer ${token}`,
-      },
-      body: JSON.stringify({ session_id: sessionId.current }),
-    }).catch(() => {});
-
-    sessionId.current = makeSessionId();
-    localStorage.setItem("sessionId", sessionId.current);
-    setMessages([]);
-    setSources([]);
+  const handleNewChat = () => {
+    setActiveId(makeSessionId());
+    setLatestKeys(new Set());
   };
 
   const handleLoadHistory = (entry) => {
-    sessionId.current = entry.id;
-    setMessages(entry.messages);
-    setSources(entry.sources);
+    setActiveId(entry.id);
     setLatestKeys(new Set());
   };
 
@@ -308,7 +367,7 @@ export default function App() {
         onLogout={handleLogout}
         history={history}
         onLoadHistory={handleLoadHistory}
-        activeId={sessionId.current}
+        activeId={activeId}
         onPin={handlePin}
         onStar={handleStar}
         onDelete={handleDelete}
@@ -321,7 +380,7 @@ export default function App() {
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto">
-          {messages.length === 0 ? (
+          {messages.length === 0 && !activeStream ? (
             <div className="flex flex-col items-center justify-center h-full gap-3">
               <h2 className="text-4xl font-bold text-slate-200">
                 Good to see you
@@ -368,20 +427,20 @@ export default function App() {
                   )}
                 </div>
               ))}
-              {streamingText !== null && (
+              {activeStream && (
                 <div className="px-6 py-3 flex justify-start">
                   <div className="flex gap-4 w-full max-w-3xl">
                     <div className="w-8 h-8 rounded-full bg-indigo-600 flex-shrink-0 flex items-center justify-center mt-0.5 shadow-lg">
                       <span className="text-white text-xs font-bold">S</span>
                     </div>
                     <div className="flex-1 min-w-0 text-base">
-                      {streamingText ? (
+                      {activeStream.text ? (
                         <ReactMarkdown
                           remarkPlugins={[remarkGfm, remarkMath]}
                           rehypePlugins={[rehypeKatex]}
                           components={markdownComponents}
                         >
-                          {streamingText}
+                          {activeStream.text}
                         </ReactMarkdown>
                       ) : (
                         <span className="inline-block w-2 h-4 bg-indigo-400 animate-pulse rounded-sm" />
@@ -398,17 +457,20 @@ export default function App() {
         {/* Input at bottom */}
         <div className="px-6 pb-6 pt-2 border-t border-slate-800/50">
           <ChatInput
-            onStreamStart={handleStreamStart}
-            onToken={handleToken}
-            onStreamEnd={handleStreamEnd}
-            sessionId={sessionId.current}
-            token={token}
-            model={model}
+            onSend={sendQuery}
+            busy={!!activeStream}
+            phase={activeStream?.phase || ""}
           />
         </div>
       </div>
 
-      <SourcesPanel sources={sources} latestKeys={latestKeys} />
+      {/* Drag handle */}
+      <div
+        onMouseDown={handleDragStart}
+        className="w-1 cursor-col-resize bg-slate-800 hover:bg-indigo-600 transition-colors flex-shrink-0"
+      />
+
+      <SourcesPanel sources={sources} latestKeys={latestKeys} width={panelWidth} />
 
     </div>
   );
