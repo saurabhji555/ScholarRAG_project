@@ -10,15 +10,15 @@
 
 # Student Details
 
-**Name:** Akriti Yadav
+**Name:** Saurabh Chandra Shukla
 
-**Email ID:** yourmail@example.com
+**Email ID:** saurabhchandrashukla2005@gmail.com
 
-**College Name:** Your College Name
+**College Name:** KMCLU
 
-**Branch/Specialization:** B.Tech CSE
+**Branch/Specialization:** B.Tech CSE AI&ML
 
-**College ID:** XXXXXXXX
+**E-NO:** a-9679
 
 ---
 
@@ -44,7 +44,7 @@
 
 # Overall Learning
 
-During this internship, I gained hands-on experience in building and deploying an end-to-end Retrieval-Augmented Generation (RAG) system. The project provided practical exposure to Docker, Kubernetes, AWS EC2, vector databases, GitHub collaboration, and cloud deployment. Working as the team leader also strengthened my communication, leadership, and project management skills.
+During this internship, I worked as frontend developer and written yaml files to manifest in deployment kubernetes  and gained experience in integration kubernetes files in our project 'rag based system'
 
 ---
 
@@ -58,10 +58,7 @@ ScholarRAG is an AI-powered research assistant that retrieves information from r
 
 ### My Contributions
 
-- Team Leader
-- Dataset preparation for RAG pipeline
-- Research paper collection
-- Docker image creation
+- Frontend
 - Containerization
 - Kubernetes Deployment
 - YAML configuration
@@ -106,7 +103,8 @@ ScholarRAG
 
 # Certificate
 
-> Attach your internship completion certificate here.
+
+
 
 ```
 certificates/
