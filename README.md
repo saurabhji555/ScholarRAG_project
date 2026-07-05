@@ -103,12 +103,9 @@ ScholarRAG
 
 # Certificate
 
-
-
-
 ```
 certificates/
-└── ScholarRAG_Certificate.pdf
+└── Saurabh Chandra Shukla.jpg.jpeg
 ```
 # Acknowledgement
 
