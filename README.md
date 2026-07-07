@@ -103,10 +103,10 @@ ScholarRAG
 
 # Certificate
 
-```
-certificates/
-└── Saurabh Chandra Shukla.jpg.jpeg
-```
+<img width="2000" height="1414" alt="Saurabh Chandra Shukla jpg" src="https://github.com/user-attachments/assets/ad24ba76-3752-40d7-87a5-1401a29c7102" />
+
+
+
 # Acknowledgement
 
 I sincerely thank my mentors **[Ujjwal Pratap Singh](https://www.linkedin.com/in/ujjwal-pratap-singh/?skipRedirect=true)** and **[Skill Nebula Private Limited](https://www.linkedin.com/company/skillnebula/posts/?feedView=all)** for their continuous guidance and support throughout this internship. This opportunity significantly enhanced my technical and professional skills.
